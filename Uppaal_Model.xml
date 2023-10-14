@@ -1,0 +1,922 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.1//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_2.dtd'>
+<nta>
+	<declaration>/**********************************************************************************************
+/******************************* GLOBAL VARIABLES *********************************************
+/**********************************************************************************************/
+
+//UNCOMMENT ONE OF THE TWO POSSIBLE CONFIGURATIONS
+/*************************** CONFIGURATION 1: PROPERTIES SATISFIED ******************************/
+
+const int R = 2;
+const int RECHARGE = 5;                 //how much charge a train will gain in a station
+const int CHARGE_DROP = 2;              //how much charge a train will lose while traveling
+const int CHARGE_DROP_WAIT = 1;         //how much charge a train will lose while waiting to enter a station  
+
+const int SAFE_TIME_MULT = 200;         //multiplier to safely proceed to next station (time)
+const int T = 4;                        //number of trains
+const int S = 5;                        //number of stations
+const int lineMaxDelay[S-1] =  { 30,   22,  21,  30 };
+const int lineDistance[S-1] =  { 120, 100,  90, 120 };
+const int trainVelocity[T] =   { 11,   10,   11,  10 };
+
+
+/*************************** CONFIGURATION 2: PROPERTIES NOT SATISFIED *****************************/
+/*
+const int R = 2;
+const int RECHARGE = 2;                 //how much charge a train will gain in a station
+const int CHARGE_DROP = 3;              //how much charge a train will lose while traveling
+const int CHARGE_DROP_WAIT = 1;         //how much charge a train will lose while waiting to enter a station  
+
+const int SAFE_TIME_MULT = 100;         //multiplier to safely proceed to next station (time)
+const int T = 4;                        //number of trains
+const int S = 5;                        //number of stations
+const int lineMaxDelay[S-1] =  {  30,   22,   21,  30 };
+const int lineDistance[S-1] =  { 300,  250,  170, 300 };
+const int trainVelocity[T] =   {  10,   10,   10,  10 };
+*/
+
+/*
+channels
+*/
+chan enter, start, wait, leave;
+urgent chan waitingToEnter,waitingToLeave;
+chan priority waitingToEnter &lt; waitingToLeave;
+
+/*
+channel declared urgent to inizialize every element of the system in the same moment
+*/
+urgent broadcast chan initialization, updateStatus, go;
+
+/*
+constants parameters for checking properties
+*/
+const int K = 10;                       //amount for time checking
+const int H = 80;                       //amount for charge checking
+
+/*
+STRUCTS
+*/
+typedef int[0,S-1] station_t;
+typedef int[0,T-1] train_t;
+
+/*
+number of total tracks free in the INDEX station
+*/
+const int stationNumberOfTracks[S] = { 3, 1, 3, 2, 2 };
+
+/*
+this is a sort of map: it provides information of where are currently the trains,
+the train is the INDEX so if for example Train(0) is at station 0, Train(1) is at
+station 1, and Train(2) is at station 2 is initialized like this:
+int whereIsTrain[3] = {0, 1, 2};
+*/
+int trainActualStation[T]={ 0,1,2, 0 };
+
+/*
+same as above, but maps the next station for each train
+*/
+int trainNextStation[T] = { 1, 0, 1, 1 };
+
+/*
+number of available tracks free in the INDEX station
+*/
+int stationAvailableTracks[S] = { 1, 0, 2, 2, 2 };
+
+/*
+vector useful to know if a train is going forward or backward: 0-&gt;1-&gt;2
+*/
+bool trainGoingForward[T] = { true, false, false, true };
+
+/*
+current distance of each train to reach the next station -- Expressed in UNITS
+*/
+int trainDistanceToNextStation[T] = { 80, 80, 70, 80 };
+
+/*
+current time left of each train to reach the next station -- Expressed in CLOCKs
+*/
+int trainTimeLeft[T] = { 30, 30, 22, 30 };
+
+/*
+Matrix useful to know which train wants to access each station
+      t0     t1        t2
+s0    false  false    false
+s1    false  false    false
+s2    false  false    false
+*/
+bool trainWantsToAccess[S][T];
+/*
+Matrix used to know which train have gained access to each station
+*/
+bool trainCanAccess[S][T];
+
+/*
+Matrix used to know which train wants to leave the station
+*/
+bool trainWantsToLeave[S][T];
+
+/*
+Matrix used to know which train have gained the right to leave each station
+*/
+bool trainCanLeave[S][T];
+
+bool trainIsWaiting[S][T];
+
+int idTrainLeaving = 0;
+
+/*
+this is the max charge of train INDEX
+*/
+int trainMaxCharge[T];
+
+/*
+charges of train, first element charge of Train(0), second element charge of Train(1) and third element charge of Train(2)
+*/
+int trainActualCharge[T]={100,100,100,100};
+
+
+/**********************************************************************************************
+/******************************* GLOBAL FUNCTIONS *********************************************
+/**********************************************************************************************/
+int min(int a, int b){
+    if (a &lt;= b)
+        return a;
+    else return b;
+}
+
+int max (int a, int b) {
+    if (a&gt;b) return a;
+    else return b;
+}
+
+bool checkFullStation(){
+    int i, j;
+    for(i=0; i&lt;S; i++) {
+        if(stationAvailableTracks[i]==0){
+            for(j=0; j&lt;T; j++)
+                if(trainIsWaiting[i][j])
+                    return true;
+        }
+    }
+    return false;
+}
+
+bool checkChargeLowerThan(int amount) {
+    int i;
+    for (i=0; i&lt;T; i++){
+        if(trainActualCharge[i]&lt;amount)
+            return true;
+    }
+    return false;
+}
+
+bool checkTimeLeftLowerThan(int amount){
+    int i;
+    for (i=0; i&lt;T; i++){
+        if(trainTimeLeft[i]&lt;amount)
+            return true;
+    }
+    return false;
+}
+
+bool checkTrainsNotOutOfPower(){
+    int i;
+    for (i=0; i&lt;T; i++) {
+        if (trainActualCharge[i] == 0)
+            return false;
+    }
+    return true;
+}
+
+bool checkTrainsNotOutOfTime(){
+    int i;
+    for (i=0; i&lt;T; i++) {
+        if (trainTimeLeft[i] &lt;= 0)
+            return false;
+    }
+    return true;
+}
+
+bool checkNoMoreAvailableTracksThanAvailable() {
+    int i;
+    for (i=0; i&lt;S; i++) {
+        if(stationAvailableTracks[i] &gt; stationNumberOfTracks[i])
+            return false;
+    }
+    return true;
+}
+
+
+</declaration>
+	<template>
+		<name>Initializer</name>
+		<declaration>// Line Functions 
+
+void initialize_all() {
+    int i,j;
+    for(i=0; i&lt;S; i++) {
+        for(j=0; j&lt;T; j++){
+            trainWantsToAccess[i][j] = false;
+            trainCanAccess[i][j] = false;
+            trainWantsToLeave[i][j] = false;
+            trainCanLeave[i][j] = false;
+            trainIsWaiting[i][j] = false;
+        }
+    }
+    for(i=0; i&lt;T; i++) {
+        trainMaxCharge[i] = 100;
+        trainActualCharge[i] = 100;
+    }
+   
+}</declaration>
+		<location id="id0" x="-365" y="-535">
+			<name x="-390" y="-569">working</name>
+		</location>
+		<location id="id1" x="-570" y="-535">
+			<name x="-586" y="-569">initial</name>
+			<committed/>
+		</location>
+		<init ref="id1"/>
+		<transition>
+			<source ref="id0"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-212" y="-399">go!</label>
+			<nail x="-365" y="-399"/>
+			<nail x="-212" y="-399"/>
+			<nail x="-212" y="-535"/>
+		</transition>
+		<transition>
+			<source ref="id1"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-510" y="-552">initialization!</label>
+			<label kind="assignment" x="-510" y="-535">initialize_all()</label>
+			<nail x="-391" y="-535"/>
+		</transition>
+	</template>
+	<template>
+		<name>Station</name>
+		<parameter>const station_t StationNumber</parameter>
+		<declaration>/*
+retrieves the # of available tracks
+*/
+int availableTracks(){
+    return stationAvailableTracks[StationNumber];
+}
+
+
+
+
+
+
+</declaration>
+		<location id="id2" x="-1326" y="-926">
+			<name x="-1385" y="-909">waiting_for_trains</name>
+		</location>
+		<location id="id3" x="-1326" y="-1121">
+			<name x="-1317" y="-1155">idle</name>
+		</location>
+		<location id="id4" x="-952" y="-1122">
+			<name x="-962" y="-1156">fully_occupied</name>
+		</location>
+		<init ref="id3"/>
+		<transition>
+			<source ref="id4"/>
+			<target ref="id2"/>
+			<label kind="guard" x="-1088" y="-952">availableTracks()&gt;0</label>
+			<label kind="synchronisation" x="-1071" y="-969">updateStatus?</label>
+			<nail x="-952" y="-926"/>
+		</transition>
+		<transition>
+			<source ref="id3"/>
+			<target ref="id4"/>
+			<label kind="guard" x="-1232" y="-1147">availableTracks() == 0</label>
+			<label kind="synchronisation" x="-1232" y="-1164">initialization?</label>
+		</transition>
+		<transition>
+			<source ref="id2"/>
+			<target ref="id4"/>
+			<label kind="guard" x="-1232" y="-1062">availableTracks()==0</label>
+			<label kind="synchronisation" x="-1232" y="-1079">updateStatus?</label>
+		</transition>
+		<transition>
+			<source ref="id3"/>
+			<target ref="id2"/>
+			<label kind="guard" x="-1479" y="-1062">availableTracks() &gt; 0</label>
+			<label kind="synchronisation" x="-1428" y="-1079">initialization?</label>
+		</transition>
+	</template>
+	<template>
+		<name>StationManager</name>
+		<declaration>/*
+variables to check before letting in/out a train
+*/
+bool canEnter = false;
+bool canLeave = false;
+
+/*
+check if train can enter with also the check on which train has the lower charge
+*/
+void checkIfTrainCanEnter(){
+    int i,j; //i is the station,j is the train
+    int minT = 2000;
+
+
+    int trainSavedIndex;
+    bool found = false;
+
+    int stationIndex; 
+    for (i=0; i&lt;S; i++){
+        for(j=0; j&lt;T; j++){
+            if(trainWantsToAccess[i][j] and (not trainCanAccess[i][j])){
+                //check whether the train was the one with the least charge
+
+                if ( min (trainActualCharge[j], trainTimeLeft[j]) &lt; minT){
+                    trainSavedIndex = j;
+                    minT = min (trainActualCharge[j], trainTimeLeft[j]);
+                    stationIndex = i;
+                    found = true;
+                } 
+            }               
+        }
+    }
+    if (stationAvailableTracks[stationIndex] == 0 &amp;&amp; found) {
+        trainIsWaiting[trainSavedIndex][trainSavedIndex]=true;
+    }
+    if(stationAvailableTracks[stationIndex] &gt; 0 &amp;&amp; found) {
+        trainCanAccess[stationIndex][trainSavedIndex] = true;
+        stationAvailableTracks[stationIndex] -= 1;
+        canEnter = true;
+    }
+}
+
+
+
+
+/*
+check if a train is willing to leave, so update the matrix trainCanLeave
+*/
+void checkIfTrainCanLeave(){
+    int i,j; //i is the station,j is the train
+    int stationIndex;
+    for (i=0; i&lt;S; i++){
+            if(trainWantsToLeave[i][idTrainLeaving] and (not trainCanLeave[i][idTrainLeaving])){
+                //no longer needed check policy here... the station manager always permits to leave because the train already made the checks
+                stationIndex = i;
+                trainCanLeave[i][idTrainLeaving] = true;
+                stationAvailableTracks[stationIndex] += 1;
+                canLeave = true;
+                return;
+            }
+    }
+}
+
+
+
+
+
+</declaration>
+		<location id="id5" x="-1037" y="-1377">
+			<name x="-1047" y="-1411">idle</name>
+		</location>
+		<location id="id6" x="-1037" y="-1165">
+			<name x="-1020" y="-1190">working</name>
+			<urgent/>
+		</location>
+		<location id="id7" x="-1453" y="-1028">
+			<name x="-1487" y="-1011">checkEnter</name>
+			<committed/>
+		</location>
+		<location id="id8" x="-1453" y="-1165">
+			<name x="-1504" y="-1199">letEnter</name>
+			<committed/>
+		</location>
+		<location id="id9" x="-663" y="-1028">
+			<name x="-697" y="-1011">checkLeave</name>
+			<committed/>
+		</location>
+		<location id="id10" x="-663" y="-1165">
+			<name x="-654" y="-1199">letLeave</name>
+			<committed/>
+		</location>
+		<init ref="id5"/>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id6"/>
+			<label kind="guard" x="-824" y="-1105">not canLeave</label>
+			<label kind="synchronisation" x="-807" y="-1122">wait!</label>
+		</transition>
+		<transition>
+			<source ref="id7"/>
+			<target ref="id6"/>
+			<label kind="guard" x="-1326" y="-1113">not canEnter</label>
+			<label kind="synchronisation" x="-1300" y="-1130">wait!</label>
+		</transition>
+		<transition>
+			<source ref="id10"/>
+			<target ref="id6"/>
+			<label kind="synchronisation" x="-884" y="-1207">updateStatus!</label>
+			<label kind="assignment" x="-884" y="-1190">canLeave = false</label>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id10"/>
+			<label kind="guard" x="-654" y="-1105">canLeave</label>
+			<label kind="synchronisation" x="-654" y="-1122">leave!</label>
+		</transition>
+		<transition>
+			<source ref="id6"/>
+			<target ref="id9"/>
+			<label kind="synchronisation" x="-1020" y="-1062">waitingToLeave?</label>
+			<label kind="assignment" x="-1020" y="-1045">checkIfTrainCanLeave()</label>
+			<nail x="-1037" y="-1028"/>
+		</transition>
+		<transition>
+			<source ref="id8"/>
+			<target ref="id6"/>
+			<label kind="synchronisation" x="-1258" y="-1207">updateStatus!</label>
+			<label kind="assignment" x="-1258" y="-1190">canEnter = false</label>
+			<nail x="-1335" y="-1165"/>
+		</transition>
+		<transition>
+			<source ref="id7"/>
+			<target ref="id8"/>
+			<label kind="guard" x="-1547" y="-1113">canEnter</label>
+			<label kind="synchronisation" x="-1547" y="-1130">enter!</label>
+		</transition>
+		<transition>
+			<source ref="id6"/>
+			<target ref="id7"/>
+			<label kind="synchronisation" x="-1207" y="-1062">waitingToEnter?</label>
+			<label kind="assignment" x="-1207" y="-1045">checkIfTrainCanEnter()</label>
+			<nail x="-1037" y="-1028"/>
+		</transition>
+		<transition>
+			<source ref="id5"/>
+			<target ref="id6"/>
+			<label kind="synchronisation" x="-1130" y="-1318">initialization?</label>
+		</transition>
+	</template>
+	<template>
+		<name>Train</name>
+		<parameter>const train_t TrainNumber</parameter>
+		<declaration>int reAsk;
+/**********************************************************************************************
+/******************************** TRAIN FUNCTIONS *********************************************
+/**********************************************************************************************/
+/*
+function to raise the battery level of a train -- policy needed
+*/
+void recharge(){
+    if( (trainActualCharge[TrainNumber] + RECHARGE)  &lt; trainMaxCharge[TrainNumber] )
+        trainActualCharge[TrainNumber] += RECHARGE;
+    else
+        trainActualCharge[TrainNumber] = trainMaxCharge[TrainNumber];
+}
+/*
+function to update the charge of a train 
+*/
+void loose_charge(int amount){
+    if( (trainActualCharge[TrainNumber] - amount) &gt;= 0 )
+        trainActualCharge[TrainNumber] -= amount;
+    else 
+        trainActualCharge[TrainNumber] = 0;
+}
+
+/*
+function to update the distance to the next station
+*/
+void update_distance (){
+    if ( (trainDistanceToNextStation[TrainNumber] - trainVelocity[TrainNumber]) &gt; 0 )
+        trainDistanceToNextStation[TrainNumber] -= trainVelocity[TrainNumber];
+    else
+        trainDistanceToNextStation[TrainNumber] = 0;
+}
+
+/*
+function used to update the next station of each train
+*/
+void updateNextStation(int trainId) {
+    if( trainGoingForward[trainId] ) {
+        if(trainActualStation[trainId] &lt; (S-1) )
+            trainNextStation[trainId] += 1;
+        else{
+            trainGoingForward[trainId] = false; //end of line reached! change direction
+            trainNextStation[trainId] -= 1;
+        }
+    }
+    else{
+        if(trainActualStation[trainId] &gt; 0)
+            trainNextStation[trainId] -= 1;
+        else {
+            trainGoingForward[trainId] = true;    //first station of line reached! change direction
+            trainNextStation[trainId] += 1;
+        }
+    }
+}
+
+/*
+update the maximum time a train can take to get to the following station
+*/
+void updateNextTime(int TrainNumber) {
+    int index;
+    if ( trainActualStation[TrainNumber] &lt; trainNextStation[TrainNumber] ) {
+        index = trainActualStation[TrainNumber];
+    }
+    else {
+        index = trainNextStation[TrainNumber];
+    }
+    trainTimeLeft[TrainNumber] = lineMaxDelay[index];
+}
+
+/*
+update the distance to reach the following station
+*/
+void updateNextDistance(int TrainNumber) {
+    int index;
+    if ( trainActualStation[TrainNumber] &lt; trainNextStation[TrainNumber] )
+        index = trainActualStation[TrainNumber];
+    else 
+        index = trainNextStation[TrainNumber];
+    trainDistanceToNextStation[TrainNumber] = lineDistance[index];
+    
+}
+
+/*
+function to update the time left ti reach the next station -- policy needed
+*/
+void updateTimeLeft (){
+    trainTimeLeft[TrainNumber] -= 1;
+}
+
+bool trainWorseThanCurrent(int stationIndex) {
+    int j;
+    for (j=0; j&lt;T; j++){
+        if (trainIsWaiting[stationIndex][j]) {
+            if( min(trainTimeLeft[j], trainActualCharge[j]) &lt; min(trainTimeLeft[TrainNumber], trainActualCharge[TrainNumber]) )
+                return true;
+        }
+    }
+    return false;
+
+}
+
+/********************************************************************/
+/*********************************BEGIN POLICIES*********************/
+/********************************************************************/
+
+bool checkBestConditionsPolicy(){
+    if ( trainTimeLeft[TrainNumber] &lt;= ((trainDistanceToNextStation[TrainNumber] / trainVelocity[TrainNumber]) * (SAFE_TIME_MULT/100)) )
+        return true;
+    else 
+        if (trainActualCharge[TrainNumber] == trainMaxCharge[TrainNumber])
+            return true;
+        else
+            return false;
+}
+
+bool checkSafePolicy(){
+    //check if it is a critical situation
+    int stationIndex = trainActualStation[TrainNumber];
+    bool waitingTrain;
+    int i;
+    for (i=0; i&lt;T; i++){
+        if(trainIsWaiting[stationIndex][i] == true)
+            waitingTrain = true;
+    }
+    if(stationAvailableTracks[stationIndex] == 0 and waitingTrain) {
+        if (trainWorseThanCurrent(stationIndex))
+            return true;
+    }
+    return false;
+}
+
+/********************************************************************/
+/*********************************END POLICIES***********************/
+/********************************************************************/
+/*
+implementation of policy to let a train leave the station
+*/
+void updateIfTrainWantsToLeave(){
+    int stationIndex = trainActualStation[TrainNumber];
+    //check both policies policies
+    if (checkSafePolicy() or checkBestConditionsPolicy())
+        trainWantsToLeave[stationIndex][TrainNumber] = true;
+    
+}
+
+/*
+function used to update all the information for the travel the train is going to run into:
+- train current station
+- train next station
+- train next time (i.e. the max time that can take the following trip)
+- train next distance (i.e. the distance to reach the next station)
+The order of the updates is crucial!
+*/
+void updateTravelInfo() {
+    int stationIndex = trainNextStation[TrainNumber];
+
+    trainActualStation[TrainNumber] = trainNextStation[TrainNumber];
+    updateNextStation(TrainNumber);
+    updateNextTime(TrainNumber);
+    updateNextDistance(TrainNumber);
+    
+    trainWantsToAccess[stationIndex][TrainNumber] = false;
+    trainCanAccess[stationIndex][TrainNumber] = false;
+    trainIsWaiting[stationIndex][TrainNumber] = false;
+}
+
+
+/*
+this function is used to save which of the trains intends to leave the station,
+introduced to solve the bug of checking who wants to leave in the checkIfTrainCanLeave() of the sm
+*/
+void updateIdTrainLeaving(){
+    idTrainLeaving = TrainNumber;
+}
+
+/*
+check if a train can proceed or must stop since 
+- either it is out of power
+- or the time is exceeded
+*/
+bool goOnCheck(){
+    return ( (trainTimeLeft[TrainNumber] &gt; 0 ) and (trainActualCharge[TrainNumber] &gt; 0) );
+}
+
+/*
+update matrix info if a train wants to enter a station
+*/
+void trainWantsToEnter(bool val){
+    int stationIndex = trainNextStation[TrainNumber];
+    trainWantsToAccess[stationIndex][TrainNumber] = val;
+}
+
+/*
+check if a train can actually enter the next station
+*/
+bool trainAccessGranted(){
+    int stationIndex = trainNextStation[TrainNumber];
+    return trainCanAccess[stationIndex][TrainNumber];
+}
+
+/*
+check if a train can actually leave the current station
+*/
+bool trainCanLeaveStation(){
+    int stationIndex = trainActualStation[TrainNumber];
+    return trainCanLeave[stationIndex][TrainNumber];
+}
+
+/*
+check if a train wants to leave the current station
+*/
+bool trainWantsToLeaveStation(){
+    int stationIndex = trainActualStation[TrainNumber];
+    return trainWantsToLeave[stationIndex][TrainNumber];
+}
+
+/*
+update matrix : train doesn't want to leave anymore, it left
+*/
+void updateTrainLeft(){
+    int stationIndex = trainActualStation[TrainNumber];
+    trainWantsToLeave[stationIndex][TrainNumber] = false;
+    trainCanLeave[stationIndex][TrainNumber] = false;
+}
+
+/*
+check if the train has no more time to reach the destination
+*/
+bool timeOver() {
+    return trainTimeLeft[TrainNumber]==0;
+}
+
+/*
+check if the train has no more time to reach the destination
+*/
+bool chargeOver() {
+    return trainActualCharge[TrainNumber]==0;
+}
+
+bool arrived(){
+    if (trainDistanceToNextStation[TrainNumber] == 0)
+        return true;
+    else 
+        return false;
+}
+
+
+
+
+
+
+
+
+
+
+
+</declaration>
+		<location id="id11" x="-986" y="-1037">
+			<name x="-1020" y="-1063">idle</name>
+		</location>
+		<location id="id12" x="-1215" y="-833">
+			<name x="-1360" y="-825">waiting_in_a_station</name>
+		</location>
+		<location id="id13" x="-595" y="-833">
+			<name x="-595" y="-867">traveling</name>
+		</location>
+		<location id="id14" x="-1700" y="-833">
+			<name x="-1759" y="-867">ready_to_enter</name>
+		</location>
+		<location id="id15" x="-1215" y="-459">
+			<name x="-1249" y="-442">out_of_power</name>
+		</location>
+		<location id="id16" x="-1215" y="-561">
+			<name x="-1257" y="-544">out_of_time</name>
+		</location>
+		<location id="id17" x="-935" y="-833">
+			<name x="-977" y="-816">ready_to_leave</name>
+			<committed/>
+		</location>
+		<location id="id18" x="-1946" y="-833">
+			<name x="-2133" y="-824">waiting_outside_a_station</name>
+		</location>
+		<init ref="id11"/>
+		<transition>
+			<source ref="id18"/>
+			<target ref="id14"/>
+			<label kind="guard" x="-1878" y="-969">goOnCheck()
+and reAsk==0</label>
+			<label kind="synchronisation" x="-1878" y="-986">waitingToEnter!</label>
+			<label kind="assignment" x="-1878" y="-935">trainWantsToEnter(true)</label>
+			<nail x="-1895" y="-918"/>
+			<nail x="-1742" y="-918"/>
+		</transition>
+		<transition>
+			<source ref="id18"/>
+			<target ref="id16"/>
+			<label kind="guard" x="-1377" y="-586">timeOver()</label>
+			<nail x="-1946" y="-561"/>
+		</transition>
+		<transition>
+			<source ref="id18"/>
+			<target ref="id15"/>
+			<label kind="guard" x="-1377" y="-484">chargeOver()</label>
+			<nail x="-1946" y="-459"/>
+		</transition>
+		<transition>
+			<source ref="id18"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-2210" y="-884">goOnCheck() and
+not trainAccessGranted()</label>
+			<label kind="synchronisation" x="-2210" y="-952">go?</label>
+			<label kind="assignment" x="-2210" y="-935">loose_charge(CHARGE_DROP_WAIT),
+updateTimeLeft(),
+reAsk -= 1</label>
+			<nail x="-2218" y="-833"/>
+			<nail x="-2218" y="-960"/>
+			<nail x="-1946" y="-960"/>
+		</transition>
+		<transition>
+			<source ref="id14"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-1895" y="-756">goOnCheck() and
+not trainAccessGranted()</label>
+			<label kind="synchronisation" x="-1895" y="-824">wait?</label>
+			<label kind="assignment" x="-1895" y="-807">loose_charge(CHARGE_DROP_WAIT),
+updateTimeLeft(), reAsk = R,
+trainWantsToEnter(false)</label>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id13"/>
+			<label kind="guard" x="-799" y="-884">trainCanLeaveStation()
+and goOnCheck()</label>
+			<label kind="synchronisation" x="-799" y="-901">leave?</label>
+			<label kind="assignment" x="-799" y="-850">updateTrainLeft()</label>
+		</transition>
+		<transition>
+			<source ref="id12"/>
+			<target ref="id17"/>
+			<label kind="guard" x="-1130" y="-884">goOnCheck() and 
+trainWantsToLeaveStation()</label>
+			<label kind="synchronisation" x="-1130" y="-901">waitingToLeave!</label>
+			<label kind="assignment" x="-1130" y="-850">updateIdTrainLeaving()</label>
+		</transition>
+		<transition>
+			<source ref="id12"/>
+			<target ref="id16"/>
+			<label kind="guard" x="-1292" y="-773">timeOver()</label>
+		</transition>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id16"/>
+			<label kind="guard" x="-1139" y="-587">timeOver()</label>
+			<nail x="-722" y="-561"/>
+		</transition>
+		<transition>
+			<source ref="id14"/>
+			<target ref="id16"/>
+			<label kind="guard" x="-1377" y="-586">timeOver()</label>
+			<nail x="-1700" y="-561"/>
+		</transition>
+		<transition>
+			<source ref="id11"/>
+			<target ref="id12"/>
+			<label kind="synchronisation" x="-1105" y="-1028">initialization?</label>
+		</transition>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id13"/>
+			<label kind="guard" x="-518" y="-791">not arrived() and goOnCheck()</label>
+			<label kind="synchronisation" x="-518" y="-841">go?</label>
+			<label kind="assignment" x="-518" y="-825">loose_charge(CHARGE_DROP), 
+update_distance(), updateTimeLeft()</label>
+			<nail x="-527" y="-748"/>
+			<nail x="-527" y="-833"/>
+		</transition>
+		<transition>
+			<source ref="id12"/>
+			<target ref="id12"/>
+			<label kind="guard" x="-1445" y="-960">not trainWantsToLeaveStation()
+and goOnCheck()</label>
+			<label kind="synchronisation" x="-1445" y="-1011">go?</label>
+			<label kind="assignment" x="-1445" y="-994">updateIfTrainWantsToLeave(),
+updateTimeLeft(), recharge()</label>
+			<nail x="-1215" y="-1020"/>
+			<nail x="-1462" y="-1020"/>
+			<nail x="-1462" y="-918"/>
+			<nail x="-1249" y="-918"/>
+		</transition>
+		<transition>
+			<source ref="id14"/>
+			<target ref="id15"/>
+			<label kind="guard" x="-1377" y="-484">chargeOver()</label>
+			<nail x="-1700" y="-459"/>
+		</transition>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id15"/>
+			<label kind="guard" x="-1139" y="-484">chargeOver()</label>
+			<nail x="-595" y="-459"/>
+		</transition>
+		<transition>
+			<source ref="id14"/>
+			<target ref="id12"/>
+			<label kind="guard" x="-1598" y="-875">goOnCheck() and trainAccessGranted()</label>
+			<label kind="synchronisation" x="-1598" y="-892">enter?</label>
+			<label kind="assignment" x="-1598" y="-858">updateTravelInfo()</label>
+		</transition>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id14"/>
+			<label kind="guard" x="-1122" y="-714">arrived() and goOnCheck()</label>
+			<label kind="synchronisation" x="-1122" y="-731">waitingToEnter!</label>
+			<label kind="assignment" x="-1122" y="-697">trainWantsToEnter(true)</label>
+			<nail x="-765" y="-680"/>
+			<nail x="-1513" y="-680"/>
+		</transition>
+	</template>
+	<system>// Place template instantiations here.
+l = Initializer();
+sm = StationManager();
+// List one or more processes to be composed into a system.
+system l,Station, Train&lt;sm;
+    </system>
+	<queries>
+		<query>
+			<formula>A[](!Train(0).out_of_time and !Train(1).out_of_time and !Train(2).out_of_time and !Train(3).out_of_time)</formula>
+			<comment>There is no train whose time left to reach the next station drops to 0</comment>
+		</query>
+		<query>
+			<formula>A[] (checkTrainsNotOutOfTime())</formula>
+			<comment>For all states it is always true that no one of the trains is out of time</comment>
+		</query>
+		<query>
+			<formula>A[](!Train(0).out_of_power and !Train(1).out_of_power and !Train(2).out_of_power and !Train(3).out_of_power)</formula>
+			<comment>There is no train whose charge drops to 0</comment>
+		</query>
+		<query>
+			<formula>A[] (checkTrainsNotOutOfPower())</formula>
+			<comment>For all states, it is always true that no one of the trains is out of charge</comment>
+		</query>
+		<query>
+			<formula>A[] (checkNoMoreAvailableTracksThanAvailable())	</formula>
+			<comment>For all the states, it never happens that a station hosts more trains than its available tracks.</comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;(checkTimeLeftLowerThan(K))</formula>
+			<comment>Checks if there is a state in which the following property is satisfied: a train's time left to reach the following station is lower than the amount specified.</comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;(checkChargeLowerThan(80))</formula>
+			<comment>Checks if there is a state in which the following property is satisfied: a train's charge is lower than the amount specified.</comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;(checkFullStation())</formula>
+			<comment>Checks if there is a state in which the following property is satisfied: a station is full and some other train is waiting outside the station.
+This query is useful to check if there is at least a critical situation in which our model is involved.</comment>
+		</query>
+	</queries>
+</nta>
